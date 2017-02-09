@@ -1,0 +1,8 @@
+{
+  "reference":"/path/to/reference_genome/human_g1k_v37.fasta",
+  "data_dir": "/path/to/directory/with/fastqs/",
+  "minreadsize": "4000",
+  "maxreadsize": "7000",
+  "picard": "/path/to/picard/picard-tools-1.115/",
+  "bwamem": "/path/to/bwa/bwa-0.7.9a/bwa"
+}

@@ -1,0 +1,115 @@
+#Tychele Turner
+#Snake for pacbio amplicon mapping
+#04192016
+
+import os
+
+if config == {}:
+    configfile: "config.json"
+
+REFERENCE = config["reference"]
+DATA_DIR = config["data_dir"]
+MINREADSIZE = config["minreadsize"]
+MAXREADSIZE = config["maxreadsize"]
+PICARD = config["picard"]
+BWAMEM = config["bwamem"]
+
+SAMPLES = []
+for file in os.listdir(DATA_DIR):
+    if file.endswith(".fastq"):
+        SAMPLES.append(str(file).split('.fastq')[0].split('.')[0])
+
+SAMPLES2 = list(set(SAMPLES))
+SAMPLES = SAMPLES2
+
+print(SAMPLES)
+
+rule all:
+    input: expand("%s/{sample}.fastq" % DATA_DIR, sample = SAMPLES), expand("{sample}.bam", sample = SAMPLES), expand("{sample}.cns.fasta", sample = SAMPLES), expand("{sample}.depth", sample = SAMPLES), expand("{sample}.freebayes.vcf", sample = SAMPLES)
+    params: sge_opts="-l mfree=20G -N run_all" 
+
+rule freebayes:
+    input: "{sample}.bam"
+    output: "{sample}.freebayes.vcf"
+    log: "{sample}.freebayes.log"
+    params: prefix="{sample}", sge_opts="-l h_vmem=10G,disk_free=20G -N freebayes -cwd "
+    shell: """
+    START=$(date +%s)
+    module load modules modules-init modules-gs
+    module load freebayes/latest
+
+    freebayes -f {REFERENCE} -C 5 -m 20 -q 20 --min-coverage 10 {input} > {output}
+
+    DIFF=$(( $END - $START ))
+    echo "$DIFF" &> {log}
+    """
+
+rule depth:
+    input: "{sample}.bam"
+    output: "{sample}.depth"
+    log: "{sample}.depth.log"
+    params: prefix="{sample}", sge_opts="-l h_vmem=10G,disk_free=20G -N depth -cwd "
+    shell: """
+    START=$(date +%s)
+
+    module load modules modules-init modules-gs
+    module load samtools/0.1.19
+
+    samtools depth {input} > {output}
+
+    DIFF=$(( $END - $START ))
+    echo "$DIFF" &> {log}
+    """
+
+rule consensus:
+    input: "{sample}.bam"
+    output: "{sample}.cns.fasta"
+    log: "{sample}.cns.fasta.log"
+    params: prefix="{sample}", sge_opts="-l h_vmem=10G,disk_free=20G -N consensus -cwd "
+    shell: """
+    START=$(date +%s)
+
+    module load modules modules-init modules-gs
+    module load samtools/0.1.19
+
+    module load samtools/0.1.19 && samtools mpileup -uf {REFERENCE} {input} | bcftools view -cg - | vcfutils.pl vcf2fq > {params.prefix}.cns.fq
+    grep -v '+' {params.prefix}.cns.fq | grep -v '~' | sed 's/@/>/g' > {output}
+
+    DIFF=$(( $END - $START ))
+    echo "$DIFF" &> {log}
+    """
+
+rule pacbio_mapping:
+    input: "%s/{sample}.fastq"%DATA_DIR
+    output: "{sample}.bam"
+    log: "{sample}.bam.log"
+    params: prefix="{sample}", sge_opts="-l h_vmem=10G,disk_free=20G -N pbamp -cwd "
+    shell: """
+    START=$(date +%s)
+
+    module load modules modules-init modules-gs
+    module load samtools/0.1.19
+
+    #size cutoffs
+    awk -v minReadSize={MINREADSIZE} -v maxReadSize={MAXREADSIZE} -v OFS='\\n' '{{header = $0 ; getline seq ; getline qheader ; getline qseq ; if (length(seq) >= minReadSize && length(seq) <= maxReadSize) {{print header, seq, qheader, qseq}}}}' < {input} > {params.prefix}_trim.fastq 
+    #map the reads
+    {BWAMEM} mem -x pacbio -M {REFERENCE} {params.prefix}_trim.fastq \
+    | samtools view -Sb - > {params.prefix}.bam
+
+    samtools sort {params.prefix}.bam {params.prefix}.bam.sorted.bam
+
+    mv {params.prefix}.bam.sorted.bam.bam {params.prefix}.bam
+
+    #add read group information
+    java -Xmx8g -XX:ParallelGCThreads=1 -jar {PICARD}AddOrReplaceReadGroups.jar INPUT={params.prefix}.bam OUTPUT={params.prefix}.bam.replace.bam RGID={params.prefix} RGLB={params.prefix} RGPL=illumina RGPU={params.prefix} RGSM={params.prefix} RGCN=illumina CREATE_INDEX=true
+
+    mv {params.prefix}.bam.replace.bam {params.prefix}.bam
+    mv {params.prefix}.bam.replace.bai {params.prefix}.bai
+
+    #index the bam
+    samtools index {output} {params.prefix}.bai
+
+    DIFF=$(( $END - $START ))
+    echo "$DIFF" &> {log}
+    """
+
